@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Procurement Planner</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <div id="app" class="container">
+      <header>
+        <h1>AI PROCUREMENT PLANNER</h1>
+        <p class="subtitle">Transform any complex mission into actionable projects & tasks in seconds.</p>
+      </header>
+
+      <div class="hero-section">
+        <div class="input-group">
+          <textarea id="mission-input" placeholder="What mission are we planning today? (e.g., Build a space station, Digitize a hospital)"></textarea>
+          <div style="display: flex; align-items: center; justify-content: flex-end; padding: 0.5rem; width: 100%;">
+            <div id="btn-loader" class="loader" style="margin-right: 1rem;"></div>
+            <button id="generate-btn" class="generate-btn">GENERATE PLAN</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="projects-container" class="projects-grid">
+        <!-- Projects will be injected here -->
+      </div>
+    </div>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>
