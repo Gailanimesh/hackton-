@@ -59,16 +59,23 @@ class ProjectConfigRequest(BaseModel):
     deadline: str
     work_mode: str
     service_tier: str
+    rfp_rules: str = ""
 
 
 class InviteRequest(BaseModel):
     project_id: str
     vendor_id: str
+    match_score: int
+    fit_analysis: str
 
 
 class RespondInviteRequest(BaseModel):
     invitation_id: str
     action: str  # 'accepted' or 'declined'
+
+class TaskStatusRequest(BaseModel):
+    task_id: str
+    is_completed: bool
 
 
 # --- Prompts ---
@@ -119,6 +126,42 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/latest-mission")
+def get_latest_mission(user_id: str):
+    """Fetch the most recent mission and its projects for a user."""
+    try:
+        supabase = get_supabase()
+        
+        # 1. Get the latest mission
+        mission_res = supabase.table("missions") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+            
+        if not mission_res.data:
+            return {"status": "success", "mission": None, "projects": []}
+            
+        mission = mission_res.data[0]
+        
+        # 2. Get projects for this mission
+        proj_res = supabase.table("projects") \
+            .select("*") \
+            .eq("mission_id", mission["id"]) \
+            .order("created_at", desc=True) \
+            .execute()
+            
+        return {
+            "status": "success", 
+            "mission": mission,
+            "projects": proj_res.data
+        }
+    except Exception as e:
+        print(f"DEBUG: Error fetching latest mission: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/generate-projects")
@@ -342,6 +385,7 @@ async def configure_project(req: ProjectConfigRequest):
             "deadline": req.deadline,
             "work_mode": req.work_mode,
             "service_tier": req.service_tier,
+            "rfp_rules": req.rfp_rules,
             "status": "matching"
         }).eq("id", req.project_id).execute()
         
@@ -386,6 +430,14 @@ async def match_vendors(project_id: str):
         
         # 3. Score each vendor using AI (Running concurrently for speed)
         async def score_vendor(vendor):
+            # Fetch history for this specific vendor
+            history_res = supabase.table("vendor_history").select("project_name, category, success_rate, feedback_summary").eq("vendor_id", vendor["id"]).execute()
+            history_data = history_res.data
+            
+            history_text = "No history available."
+            if history_data:
+                history_text = "\n".join([f"- {h['project_name']} ({h['category']}): {h['success_rate']}% success. Feedback: {h.get('feedback_summary', 'None')}" for h in history_data])
+
             prompt = MATCHING_PROMPT.format(
                 project_name=project["project_name"],
                 required_technologies=project.get("required_technologies", "None specified"),
@@ -394,9 +446,11 @@ async def match_vendors(project_id: str):
                 deadline=project.get("deadline"),
                 work_mode=project.get("work_mode"),
                 service_tier=project.get("service_tier"),
+                rfp_rules=project.get("rfp_rules") or "None specified",
                 business_name=vendor.get("business_name", "Unknown Vendor"),
                 vendor_domain=vendor.get("vendor_domain", "Unknown Domain"),
-                skills=", ".join(vendor.get("skills", []))
+                skills=", ".join(vendor.get("skills", [])),
+                vendor_history=history_text
             )
             try:
                 # In a real async app we'd use an async LLM client, but for MVP we wrap the sync call
@@ -409,7 +463,8 @@ async def match_vendors(project_id: str):
                     "domain": vendor.get("vendor_domain", "Unknown Domain"),
                     "skills": vendor.get("skills", []),
                     "match_score": result.get("score", 0),
-                    "match_reason": result.get("match_reason", "No reason provided.")
+                    "match_reason": result.get("match_reason", "No reason provided."),
+                    "fit_analysis": result.get("fit_analysis", "You have been identified as a strong candidate based on your profile and skills.")
                 }
             except Exception as e:
                 print(f"DEBUG: Failed to score vendor {vendor['id']}: {e}")
@@ -448,23 +503,31 @@ def get_vendor_profile(vendor_id: str):
 
 @app.post("/invite-vendor")
 def invite_vendor(req: InviteRequest):
-    """Manager invites a vendor from the Matching Hub."""
+    """Link a vendor to a project by creating an invitation."""
     try:
         supabase = get_supabase()
-        # Insert the invitation, resolving conflicts if an invite already exists
-        res = supabase.table("invitations").upsert({
+        res = supabase.table("invitations").insert({
             "project_id": req.project_id,
             "vendor_id": req.vendor_id,
-            "status": "pending"
+            "status": "pending",
+            "match_score": req.match_score,
+            "fit_analysis": req.fit_analysis
         }).execute()
         
         if not res.data:
-            raise HTTPException(status_code=500, detail="Failed to send invitation.")
-            
+            # Fallback for upsert if already invited but want to update score/analysis
+            res = supabase.table("invitations").upsert({
+                "project_id": req.project_id,
+                "vendor_id": req.vendor_id,
+                "status": "pending",
+                "match_score": req.match_score,
+                "fit_analysis": req.fit_analysis
+            }).execute()
+
         return {"status": "success", "data": res.data[0]}
     except Exception as e:
-        print(f"DEBUG: Invitation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to invite: {str(e)}")
+        print(f"DEBUG: Invitation Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/vendor-invitations")
@@ -510,9 +573,72 @@ def respond_invitation(req: RespondInviteRequest):
         if not res.data:
             raise HTTPException(status_code=404, detail="Invitation not found or could not be updated.")
             
-        return {"status": "success", "data": res.data[0]}
+        invitation = res.data[0]
+        
+        # If accepted, mark the project as 'active' so the War Room can begin
+        if req.action == 'accepted':
+            supabase.table("projects").update({
+                "status": "active"
+            }).eq("id", invitation["project_id"]).execute()
+            
+        return {"status": "success", "data": invitation}
     except Exception as e:
         print(f"DEBUG: Respond invite error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/project-war-room")
+def get_project_war_room(project_id: str):
+    """Fetch all data needed for the shared execution dashboard."""
+    try:
+        supabase = get_supabase()
+        
+        # 1. Get Project Details
+        proj_res = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj_res.data:
+            raise HTTPException(status_code=404, detail="Project not found")
+        project = proj_res.data[0]
+        
+        # 2. Get Subtasks
+        tasks_res = supabase.table("subtasks").select("*").eq("project_id", project_id).order("created_at").execute()
+        tasks = tasks_res.data
+        
+        # 3. Find the Accepted Vendor (if any)
+        inv_res = supabase.table("invitations").select("vendor_id, match_score").eq("project_id", project_id).eq("status", "accepted").limit(1).execute()
+        vendor_details = None
+        
+        if inv_res.data:
+            v_id = inv_res.data[0]["vendor_id"]
+            v_res = supabase.table("vendor_details").select("business_name, vendor_domain, skills").eq("id", v_id).execute()
+            if v_res.data:
+                vendor_details = v_res.data[0]
+                vendor_details["match_score"] = inv_res.data[0]["match_score"]
+
+        return {
+            "status": "success",
+            "project": project,
+            "tasks": tasks,
+            "vendor": vendor_details
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"DEBUG: War Room fetch error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/update-task-status")
+def update_task_status(req: TaskStatusRequest):
+    """Toggle a subtask's completion status."""
+    try:
+        supabase = get_supabase()
+        res = supabase.table("subtasks").update({
+            "is_completed": req.is_completed
+        }).eq("id", req.task_id).execute()
+        
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Task not found")
+            
+        return {"status": "success", "data": res.data[0]}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

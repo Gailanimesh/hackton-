@@ -150,7 +150,7 @@ function renderDashboardForRole(role, email) {
                         </div>
                         <div class="config-field" style="grid-column: span 2;">
                             <label>Minimum Project Size (USD)</label>
-                            <input type="number" id="vendor-min-budget" placeholder="e.g. 1000" value="0">
+                            <input type="number" id="vendor-min-budget" placeholder="e.g. 1000" min="200" value="200">
                         </div>
                     </div>
                     
@@ -160,6 +160,21 @@ function renderDashboardForRole(role, email) {
           </div>
         `;
         setupVendorListeners();
+        })();
+    } else {
+        // Manager branch: Fetch latest mission and projects
+        (async () => {
+            try {
+                const response = await fetch(`${API_BASE}/latest-mission?user_id=${currentUser.id}`);
+                const resData = await response.json();
+                
+                if (response.ok && resData.mission) {
+                    if (missionInput) missionInput.value = resData.mission.mission_text;
+                    renderProjects(resData.projects);
+                }
+            } catch (err) {
+                console.error("Error fetching latest mission:", err);
+            }
         })();
     }
 }
@@ -266,6 +281,13 @@ async function handleFileUpload(file) {
 
 async function handleManualSubmit(e) {
     e.preventDefault();
+
+    const minBudget = parseFloat(document.getElementById('vendor-min-budget').value) || 0;
+    if (minBudget < 200) {
+        showToast("Minimum project size must be at least $200.", "error");
+        return;
+    }
+
     const btn = e.target.querySelector('button');
     const originalText = btn.innerText;
     
@@ -418,11 +440,11 @@ window.openConfigModal = function(projectId, projectName) {
             <div class="config-grid">
                 <div class="config-field">
                     <label>Budget (USD)</label>
-                    <input type="number" id="config-budget" placeholder="e.g. 5000">
+                    <input type="number" id="config-budget" placeholder="e.g. 5000" min="200">
                 </div>
                 <div class="config-field">
                     <label>Deadline</label>
-                    <input type="date" id="config-deadline">
+                    <input type="date" id="config-deadline" min="${new Date().toISOString().split('T')[0]}">
                 </div>
                 <div class="config-field">
                     <label>Work Mode</label>
@@ -439,6 +461,10 @@ window.openConfigModal = function(projectId, projectName) {
                         <option value="quality">Quality (Enterprise Grade)</option>
                     </select>
                 </div>
+                <div class="config-field" style="grid-column: span 2;">
+                    <label>RFP Rules (Optional)</label>
+                    <input type="text" id="config-rfp" placeholder="e.g. Must have ISO 27001, Must have 5+ years experience">
+                </div>
             </div>
 
             <button class="match-btn" onclick="submitConfiguration('${projectId}', '${projectName.replace(/'/g, "\\'")}')">FIND MATCHING VENDORS 🚀</button>
@@ -447,13 +473,28 @@ window.openConfigModal = function(projectId, projectName) {
 };
 
 window.submitConfiguration = async function(projectId, projectName) {
-    const budget = document.getElementById('config-budget').value;
+    const budgetRaw = document.getElementById('config-budget').value;
     const deadline = document.getElementById('config-deadline').value;
     const mode = document.getElementById('config-mode').value;
     const tier = document.getElementById('config-tier').value;
+    const rfpInput = document.getElementById('config-rfp');
+    const rfp = rfpInput ? rfpInput.value : '';
+
+    const budget = parseFloat(budgetRaw);
 
     if (!budget || !deadline) {
         showToast("Please fill in budget and deadline.", "error");
+        return;
+    }
+
+    if (budget < 200) {
+        showToast("Budget must be at least $200.", "error");
+        return;
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    if (deadline < today) {
+        showToast("Deadline must be in the future.", "error");
         return;
     }
 
@@ -467,16 +508,17 @@ window.submitConfiguration = async function(projectId, projectName) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 project_id: projectId,
-                budget: parseFloat(budget),
-                deadline,
+                budget: budget,
+                deadline: deadline,
                 work_mode: mode,
-                service_tier: tier
+                service_tier: tier,
+                rfp_rules: rfp
             })
         });
 
         if (!response.ok) throw new Error("Matching service failed");
 
-        showToast("✨ Configuration Saved! Finding best vendors...", "success");
+        showToast("Configuration Saved! Finding best vendors...", "success");
         setTimeout(() => {
             document.getElementById('modal-overlay').style.display = 'none';
             loadMatchingHub(projectId, projectName);
@@ -490,6 +532,10 @@ window.submitConfiguration = async function(projectId, projectName) {
 };
 
 async function loadMatchingHub(projectId, projectName) {
+    // Save original header state if not saved
+    if (!window.originalHeaderH1) window.originalHeaderH1 = document.querySelector('header h1').innerText;
+    if (!window.originalHeaderP) window.originalHeaderP = document.querySelector('header p.subtitle').innerText;
+
     // Hide default project list and input
     const heroSection = document.querySelector('.hero-section');
     if (heroSection) heroSection.style.display = 'none';
@@ -561,19 +607,34 @@ function renderMatchingHub(projectId, matches) {
             </div>
 
             <div class="match-footer">
-                <button class="invite-btn" onclick="inviteVendor('${projectId}', '${match.vendor_id}', this)">
+                <button class="invite-btn" onclick="inviteVendor('${projectId}', '${match.vendor_id}', this, ${match.match_score}, '${match.fit_analysis.replace(/'/g, "\\'")}')">
                     INVITE TO PROJECT
                 </button>
             </div>
         </div>
     `).join('') + `
-        <button class="auth-btn" style="background: transparent; border: 1px solid rgba(255,255,255,0.2); margin-top: 1rem;" onclick="window.location.reload()">
+        <button class="back-link-btn" onclick="goBackToProjects()">
             ← BACK TO ALL PROJECTS
         </button>
     `;
 }
 
-window.inviteVendor = async function(projectId, vendorId, btnElement) {
+window.goBackToProjects = function() {
+    const heroSection = document.querySelector('.hero-section');
+    if (heroSection) heroSection.style.display = 'flex';
+    
+    const headerH1 = document.querySelector('header h1');
+    const headerP = document.querySelector('header p.subtitle');
+    if (headerH1 && window.originalHeaderH1) headerH1.innerText = window.originalHeaderH1;
+    if (headerP && window.originalHeaderP) headerP.innerText = window.originalHeaderP;
+    
+    // Only fetch if projects empty, otherwise just clear hub
+    if (projectsContainer.children.length === 0 || projectsContainer.querySelector('.match-card')) {
+        renderDashboardForRole(currentUser.user_metadata?.role || 'manager', currentUser.email);
+    }
+};
+
+window.inviteVendor = async function(projectId, vendorId, btnElement, score, analysis) {
     btnElement.disabled = true;
     btnElement.innerText = "SENDING INVITE...";
     
@@ -583,7 +644,9 @@ window.inviteVendor = async function(projectId, vendorId, btnElement) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 project_id: projectId,
-                vendor_id: vendorId
+                vendor_id: vendorId,
+                match_score: score,
+                fit_analysis: analysis
             })
         });
 
@@ -636,14 +699,20 @@ async function renderVendorInbox(email) {
                 <div class="match-header">
                     <div>
                         <h3 style="margin: 0; color: #00f2fe;">${inv.project_details?.project_name || 'Unknown Project'}</h3>
-                        <div style="font-size: 0.8rem; opacity: 0.6; margin-top: 0.3rem;">Status: ${inv.status.toUpperCase()}</div>
+                        <div style="font-size: 0.8rem; opacity: 0.6; margin-top: 0.3rem;">
+                            Match Score: <span style="color: #00f2fe; font-weight: bold;">${inv.match_score || 'N/A'}%</span> &nbsp;|&nbsp; Status: ${inv.status.toUpperCase()}
+                        </div>
                     </div>
                     <div style="font-size: 0.9rem; font-weight: bold; text-align: right;">
                         Budget: $${inv.project_details?.budget || 'N/A'} <br/>
                         Deadline: ${inv.project_details?.deadline || 'N/A'}
                     </div>
                 </div>
-                <div class="match-reason" style="margin-top: 1rem;">
+                <div class="match-reason" style="margin-top: 1rem; padding: 1rem; background: rgba(0, 242, 254, 0.05); border-left: 3px solid #00f2fe; border-radius: 8px;">
+                    <div style="font-weight: bold; font-size: 0.85rem; margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 1px;">AI Proposal Analysis</div>
+                    <div style="font-size: 0.95rem; line-height: 1.5;">${inv.fit_analysis || 'Review the requirements below to verify if this project aligns with your current capabilities.'}</div>
+                </div>
+                <div class="match-reason" style="margin-top: 1rem; font-size: 0.9rem; opacity: 0.8;">
                     <strong>Requirements:</strong> ${inv.project_details?.required_technologies || 'None specified'}
                     <br/><br/>
                     <strong>Mode:</strong> ${inv.project_details?.work_mode || 'N/A'} &nbsp;|&nbsp; <strong>Tier:</strong> ${inv.project_details?.service_tier || 'N/A'}
@@ -652,11 +721,11 @@ async function renderVendorInbox(email) {
                 ${inv.status === 'pending' ? `
                     <div class="match-footer" style="margin-top: 1rem; justify-content: flex-end; gap: 1rem; display: flex;">
                         <button class="auth-btn" style="width: auto; background: transparent; border: 1px solid rgba(255,68,68,0.5); color: #ff4444;" onclick="respondInvitation('${inv.id}', 'declined')">Decline</button>
-                        <button class="match-btn" style="width: auto; margin: 0;" onclick="respondInvitation('${inv.id}', 'accepted')">Accept & Enter War Room</button>
+                        <button class="match-btn" style="width: auto; margin: 0;" onclick="respondInvitation('${inv.id}', 'accepted', '${inv.project_id}')">Accept & Enter War Room</button>
                     </div>
                 ` : `
                     <div class="match-footer" style="margin-top: 1rem;">
-                        <button class="match-btn" style="width: 100%; margin: 0; background: ${inv.status === 'accepted' ? '#00f2fe' : 'rgba(255,255,255,0.1)'}; color: ${inv.status === 'accepted' ? '#000' : '#fff'};" ${inv.status === 'declined' ? 'disabled' : ''}>
+                        <button class="match-btn" style="width: 100%; margin: 0; background: ${inv.status === 'accepted' ? '#00f2fe' : 'rgba(255,255,255,0.1)'}; color: ${inv.status === 'accepted' ? '#000' : '#fff'};" ${inv.status === 'declined' ? 'disabled' : ''} onclick="${inv.status === 'accepted' ? `renderWarRoom('${inv.project_id}')` : ''}">
                             ${inv.status === 'accepted' ? 'ENTER WAR ROOM' : 'DECLINED'}
                         </button>
                     </div>
@@ -771,7 +840,7 @@ window.editVendorProfile = async function() {
     }
 }
 
-window.respondInvitation = async function(invitationId, action) {
+window.respondInvitation = async function(invitationId, action, projectId = null) {
     try {
         const response = await fetch(`${API_BASE}/respond-invitation`, {
             method: 'POST',
@@ -783,11 +852,171 @@ window.respondInvitation = async function(invitationId, action) {
         });
         if (!response.ok) throw new Error("Failed to respond");
         
-        showToast(`Invitation ${action}!`, "success");
-        // Reload inbox
-        renderDashboardForRole('vendor', currentUser.email);
+        if (action === 'accepted' && projectId) {
+            showToast("Project Accepted! Initiating War Room...", "success");
+            setTimeout(() => renderWarRoom(projectId), 1000);
+        } else {
+            showToast(`Invitation ${action}!`, "success");
+            renderDashboardForRole('vendor', currentUser.email);
+        }
     } catch (err) {
         showToast(err.message, "error");
+    }
+};
+
+window.renderWarRoom = async function(projectId) {
+    heroSection.innerHTML = `<div class="loader" style="display: block; margin: 5rem auto;"></div><div style="text-align:center;">Initializing War Room...</div>`;
+
+    try {
+        const response = await fetch(`${API_BASE}/project-war-room?project_id=${projectId}`);
+        if (!response.ok) throw new Error("Failed to load War Room data.");
+        let data = await response.json();
+        
+        let proj = data.project;
+        let tasks = data.tasks || [];
+        const vendor = data.vendor;
+        
+        // Auto-Generate subtasks if the manager bypassed the click expanding in the hub
+        if (tasks.length === 0) {
+            heroSection.innerHTML = `<div class="loader" style="display: block; margin: 5rem auto;"></div><div style="text-align:center;">AI is analyzing requirements and generating a task breakdown...</div>`;
+            try {
+                const genRes = await fetch(`${API_BASE}/generate-subtasks`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ project_id: projectId, project_name: proj.project_name })
+                });
+                if (genRes.ok) {
+                    // Refetch war room data to get the newly generated tasks
+                    const refreshRes = await fetch(`${API_BASE}/project-war-room?project_id=${projectId}`);
+                    if (refreshRes.ok) {
+                        data = await refreshRes.json();
+                        tasks = data.tasks || [];
+                    }
+                }
+            } catch(e) { console.error("Auto-generate tasks failed", e); }
+        }
+        
+        const isManager = currentUser.user_metadata?.role === 'manager';
+        
+        const completedCount = tasks.filter(t => t.is_completed).length;
+        const progressPercent = tasks.length > 0 ? Math.round((completedCount / tasks.length) * 100) : 0;
+
+        const backBtn = isManager
+            ? `<button class="back-link-btn" style="margin:0;" onclick="goBackToProjects()">← Dashboard</button>`
+            : `<button class="back-link-btn" style="margin:0;" onclick="goToVendorInbox()">← Inbox</button>`;
+        
+        const statusColor = progressPercent === 100 ? '#0ba360' : progressPercent > 50 ? '#f0a500' : '#00f2fe';
+        const statusLabel = progressPercent === 100 ? 'COMPLETED' : progressPercent > 0 ? 'IN PROGRESS' : 'STARTING';
+
+        heroSection.innerHTML = `
+            <div class="war-room-container fade-in">
+                <!-- War Room Top Header Bar -->
+                <div class="war-room-header">
+                    <div class="war-room-title-block">
+                        <div class="war-room-badge">🚀 WAR ROOM</div>
+                        <h2 class="war-room-title">${proj.project_name}</h2>
+                        <p class="war-room-subtitle">${proj.description || ''}</p>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:1rem; flex-shrink:0;">
+                        <div class="war-room-status-badge" style="border-color: ${statusColor}; color: ${statusColor};">${statusLabel}</div>
+                        ${backBtn}
+                    </div>
+                </div>
+
+                <!-- Progress Bar Strip -->
+                <div class="war-room-progress-strip">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+                        <span style="font-size:0.85rem; opacity:0.7; text-transform: uppercase; letter-spacing: 1px;">Mission Progress</span>
+                        <span style="font-size:1.1rem; font-weight: 800; color:${statusColor};">${progressPercent}%</span>
+                    </div>
+                    <div class="war-room-progress-bar-bg">
+                        <div class="war-room-progress-bar-fill" style="width: ${progressPercent}%; background: linear-gradient(90deg, ${progressPercent === 100 ? '#0ba360, #3cba92' : '#00f2fe, #4facfe'});"></div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; margin-top:0.4rem; font-size:0.75rem; opacity:0.5;">
+                        <span>${completedCount} of ${tasks.length} milestones cleared</span>
+                        <span>Deadline: ${proj.deadline || 'N/A'}</span>
+                    </div>
+                </div>
+
+                <!-- Main 2-Column Body -->
+                <div class="war-room-body">
+                    
+                    <!-- Left Card: Mission Intel -->
+                    <div class="war-room-intel-card">
+                        <div class="intel-section">
+                            <h4 class="intel-title">📋 Mission Brief</h4>
+                            <div class="intel-row"><span class="intel-label">Budget</span><span class="intel-value">$${proj.budget || 'N/A'}</span></div>
+                            <div class="intel-row"><span class="intel-label">Mode</span><span class="intel-value">${proj.work_mode || 'N/A'}</span></div>
+                            <div class="intel-row"><span class="intel-label">Tier</span><span class="intel-value">${proj.service_tier || 'N/A'}</span></div>
+                            ${proj.rfp_rules ? `<div class="intel-rfp-rules"><span class="intel-label">⚠️ RFP Rules</span><p class="intel-rfp-text">${proj.rfp_rules}</p></div>` : ''}
+                        </div>
+                        ${vendor ? `
+                        <div class="intel-section" style="margin-top: 1.5rem;">
+                            <h4 class="intel-title">🤝 Assigned Vendor</h4>
+                            <div class="vendor-intel-card">
+                                <div class="vendor-intel-name">${vendor.business_name}</div>
+                                <div class="vendor-intel-score">${vendor.match_score}% AI Match</div>
+                                <div class="vendor-intel-domain">${vendor.vendor_domain}</div>
+                                <div class="vendor-intel-skills">${vendor.skills.slice(0, 4).join(' · ')}</div>
+                            </div>
+                        </div>
+                        ` : `
+                        <div class="intel-section" style="margin-top: 1.5rem; opacity:0.5; font-style:italic; font-size:0.9rem;">Awaiting Vendor Acceptance...</div>
+                        `}
+                    </div>
+
+                    <!-- Right Card: Task Checklist -->
+                    <div class="war-room-checklist-card">
+                        <h4 class="intel-title" style="margin-bottom:1.5rem;">⚡ Execution Milestones</h4>
+                        <div class="task-list">
+                            ${tasks.length > 0 ? tasks.map((t, i) => `
+                                <div class="task-item ${t.is_completed ? 'task-done' : ''}" id="task-wrapper-${t.id}" onclick="document.getElementById('task-cb-${t.id}').click()">
+                                    <div class="task-num">${i + 1}</div>
+                                    <input type="checkbox" id="task-cb-${t.id}" style="display:none;" ${t.is_completed ? 'checked' : ''} onchange="toggleTaskStatus('${t.id}', this.checked, '${projectId}')">
+                                    <div class="task-check-icon">${t.is_completed ? '✅' : '<div class="task-empty-check"></div>'}</div>
+                                    <div class="task-text">${t.task_name}</div>
+                                </div>
+                            `).join('') : '<div style="opacity: 0.5; font-style: italic; padding: 1rem;">Generating milestones...</div>'}
+                        </div>
+
+                        ${progressPercent === 100 ? `
+                            <div class="war-room-complete-banner">
+                                <div style="font-size: 2rem; margin-bottom: 0.5rem;">🎉</div>
+                                <h3 style="color: #0ba360; margin: 0 0 0.5rem;">Project Successfully Delivered!</h3>
+                                <p style="opacity:0.7; font-size:0.9rem;">All milestones verified. Outstanding execution by the entire team.</p>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            </div>
+        `;
+    } catch (err) {
+        showToast(err.message, "error");
+        heroSection.innerHTML = `<div style="text-align:center; color:#ff4444; margin-top:5rem;">Failed to load War Room.</div>`;
+    }
+};
+
+// Globally accessible navigation helpers for inline onclick handlers
+window.goToVendorInbox = function() {
+    if (currentUser) renderDashboardForRole('vendor', currentUser.email);
+};
+
+window.toggleTaskStatus = async function(taskId, isCompleted, projectId) {
+    try {
+        const response = await fetch(`${API_BASE}/update-task-status`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_id: taskId, is_completed: isCompleted })
+        });
+        if (!response.ok) throw new Error("Failed to update task");
+        
+        // Re-render instantly to show progress bar update
+        renderWarRoom(projectId);
+    } catch (err) {
+        showToast(err.message, "error");
+        // Revert UI toggle on fail
+        const t = document.getElementById(`task-${taskId}`);
+        if(t) t.checked = !isCompleted;
     }
 };
 

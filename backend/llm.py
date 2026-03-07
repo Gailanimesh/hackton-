@@ -65,24 +65,35 @@ def _call_groq(prompt: str) -> str:
 MATCHING_PROMPT = """You are an AI Matchmaker for a procurement platform.
 Your job is to evaluate if a Vendor is a good match for a specific Project.
 The project has a budget, deadline, work mode, and service tier requirement.
-The vendor has a specific domain and skill set.
+The vendor has a specific domain, skill set, and preferred execution preferences.
 
 Project Name: {project_name}
 Project Requirements: {required_technologies}
 Project Description: {description}
 Project Constraints: Budget: ${budget}, Deadline: {deadline}, Mode: {work_mode}, Tier: {service_tier}
+RFP Rules / Compliance Needs: {rfp_rules}
 
 Vendor Name: {business_name}
 Vendor Domain: {vendor_domain}
 Vendor Skills: {skills}
+Vendor Past Performance History: {vendor_history}
 
-Calculate a match score from 0-100 based on how well this vendor fits the project.
-Provide a 1-sentence "match_reason" explaining exactly why they fit (or don't fit). Keep it punchy and professional (e.g., "92% Match: Perfect domain alignment and remote-ready skills.").
+Scoring Criteria:
+1. Technical Fit (30%): Does the vendor have the specific skills and technologies required?
+2. RFP Compliance (30%): Does the vendor's profile and history prove they meet the strict RFP rules? Deduct heavily if they fail a hard constraint.
+3. Historical Reliability (25%): Does their past performance history show they are reliable and competent for this type of work?
+4. Logistics & Tier (15%): Does the project budget meet the vendor's minimums, and is the service tier compatible?
+
+Output:
+- score: A match score from 0-100.
+- match_reason: A 1-sentence punchy summary for the MANAGER (e.g., "Perfect technical fit, 100% RFP compliant, and proven 98% success rate in past projects.").
+- fit_analysis: A 2-3 sentence technical analysis for the VENDOR, explaining why they were selected and how their specific history or skills align with the RFP and project constraints.
 
 Return ONLY a JSON object with this exact format:
 {{
     "score": 85,
-    "match_reason": "Strong alignment in required technologies, though their enterprise tier might push the budget."
+    "match_reason": "Strong technical alignment and proven history, though budget is tight.",
+    "fit_analysis": "Your profile was selected because your React skills perfectly match the 'Project Name' requirements, and your past 98% success rate in Software Migration proves you can handle this. You also fully satisfy the ISO 27001 RFP requirement."
 }}
 """
 
