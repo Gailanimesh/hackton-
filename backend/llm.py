@@ -62,26 +62,51 @@ def _call_groq(prompt: str) -> str:
     return data["choices"][0]["message"]["content"].strip()
 
 
+MATCHING_PROMPT = """You are an AI Matchmaker for a procurement platform.
+Your job is to evaluate if a Vendor is a good match for a specific Project.
+The project has a budget, deadline, work mode, and service tier requirement.
+The vendor has a specific domain and skill set.
+
+Project Name: {project_name}
+Project Requirements: {required_technologies}
+Project Description: {description}
+Project Constraints: Budget: ${budget}, Deadline: {deadline}, Mode: {work_mode}, Tier: {service_tier}
+
+Vendor Name: {business_name}
+Vendor Domain: {vendor_domain}
+Vendor Skills: {skills}
+
+Calculate a match score from 0-100 based on how well this vendor fits the project.
+Provide a 1-sentence "match_reason" explaining exactly why they fit (or don't fit). Keep it punchy and professional (e.g., "92% Match: Perfect domain alignment and remote-ready skills.").
+
+Return ONLY a JSON object with this exact format:
+{{
+    "score": 85,
+    "match_reason": "Strong alignment in required technologies, though their enterprise tier might push the budget."
+}}
+"""
+
 def call_llm(prompt: str) -> str:
     errors = []
-    # Try Groq
-    if GROQ_API_KEY:
+    # Try Gemini FIRST since we know it works from Phase 3
+    if GOOGLE_API_KEY:
         try:
-            return _call_groq(prompt)
+            return _call_gemini(prompt)
         except Exception as e:
-            errors.append(f"Groq failed: {str(e)}")
+            errors.append(f"Gemini failed: {str(e)}")
     # Try OpenAI
     if OPENAI_API_KEY:
         try:
             return _call_openai(prompt)
         except Exception as e:
             errors.append(f"OpenAI failed: {str(e)}")
-    # Try Gemini
-    if GOOGLE_API_KEY:
+    # Try Groq
+    if GROQ_API_KEY:
         try:
-            return _call_gemini(prompt)
+            return _call_groq(prompt)
         except Exception as e:
-            errors.append(f"Gemini failed: {str(e)}")
+            errors.append(f"Groq failed: {str(e)}")
+    
     raise ValueError(" | ".join(errors) or "No API keys configured")
 
 

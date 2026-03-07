@@ -9,6 +9,9 @@ from pydantic import BaseModel
 from uuid import UUID
 from database import get_supabase
 from llm import call_llm, parse_json_response, parse_list
+from fastapi import UploadFile, File, Form
+from pypdf import PdfReader
+import io
 
 app = FastAPI(title="AI Procurement Planner API")
 
@@ -40,6 +43,34 @@ class SubtaskRequest(BaseModel):
     project_name: str
 
 
+class VendorProfileRequest(BaseModel):
+    user_id: str
+    business_name: str
+    services: str
+    domain: str
+    preferred_work_mode: str = "remote"
+    service_tier: str = "speed"
+    min_budget: float = 0
+
+
+class ProjectConfigRequest(BaseModel):
+    project_id: str
+    budget: float
+    deadline: str
+    work_mode: str
+    service_tier: str
+
+
+class InviteRequest(BaseModel):
+    project_id: str
+    vendor_id: str
+
+
+class RespondInviteRequest(BaseModel):
+    invitation_id: str
+    action: str  # 'accepted' or 'declined'
+
+
 # --- Prompts ---
 PROJECT_PROMPT = """You are a procurement planning expert.
 Convert the following mission into 3-5 procurement projects.
@@ -62,6 +93,21 @@ Return ONLY valid JSON in this exact format (no markdown):
 {{"tasks":["Task 1","Task 2","Task 3","Task 4","Task 5"]}}
 
 Return tasks suitable for a software development team."""
+
+VENDOR_EXTRACTION_PROMPT = """You are an expert procurement assistant.
+Analyze the following text from a vendor's document (CV, Catalog, or Flyer).
+Extract the following information in a structured JSON format:
+1. Business Name (or Person Name if it's a CV)
+2. Primary Domain (e.g., IT, Logistics, Supply, Construction)
+3. List of Services/Capabilities (as a comma-separated string)
+4. Preferred Work Mode (Guess 'remote', 'onsite', or 'hybrid' based on the services)
+5. Service Tier (Guess 'speed' for agile/fast services, or 'quality' for enterprise/ISO-certified services)
+
+Return ONLY valid JSON in this format:
+{"business_name": "Name", "domain": "Industry", "services": "Service 1, Service 2", "preferred_work_mode": "remote", "service_tier": "speed"}
+
+Document Text:
+"""
 
 
 # --- Routes ---
@@ -197,6 +243,277 @@ def get_tasks(project_id: UUID):
     res = supabase.table("subtasks").select("*").eq("project_id", str(project_id)).execute()
     return {"data": res.data}
 
+
+# --- Vendor Routes ---
+
+@app.post("/upload-document")
+async def upload_document(user_id: str = Form(...), file: UploadFile = File(...)):
+    """Extract vendor details from an uploaded PDF or Text file using AI."""
+    content = await file.read()
+    text = ""
+
+    # 1. Extract Text
+    if file.filename.endswith(".pdf"):
+        try:
+            reader = PdfReader(io.BytesIO(content))
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to read PDF: {str(e)}")
+    else:
+        # Assume text/plain
+        try:
+            text = content.decode("utf-8")
+        except:
+            text = content.decode("latin-1")
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Could not extract any text from the document.")
+
+    # 2. Call LLM for extraction
+    try:
+        print(f"DEBUG: Calling AI to analyze document for user: {user_id}")
+        # Limit text to avoid token limits
+        prompt = VENDOR_EXTRACTION_PROMPT + text[:4000] 
+        raw = call_llm(prompt)
+        data = parse_json_response(raw)
+        
+        return {
+            "status": "success",
+            "extracted_data": {
+                "business_name": data.get("business_name", ""),
+                "domain": data.get("domain", ""),
+                "services": data.get("services", ""),
+                "preferred_work_mode": data.get("preferred_work_mode", "remote"),
+                "service_tier": data.get("service_tier", "speed")
+            }
+        }
+    except Exception as e:
+        print(f"DEBUG: AI Extraction Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI failed to analyze document: {str(e)}")
+
+
+@app.post("/update-vendor-profile")
+async def update_vendor_profile(req: VendorProfileRequest):
+    """Save or update a vendor's profile in the database."""
+    try:
+        supabase = get_supabase()
+        
+        # We use upsert to create or update the profile
+        # First, ensure the base profile exists to satisfy the foreign key constraint
+        try:
+            supabase.table("profiles").upsert({
+                "id": req.user_id,
+                "full_name": req.business_name,
+                "role": "vendor"
+            }).execute()
+        except Exception as e:
+            print(f"DEBUG: Fallback profile creation failed: {str(e)}")
+
+        # Supabase will handle the primary key (user_id) conflict
+        res = supabase.table("vendor_details").upsert({
+            "id": req.user_id,
+            "business_name": req.business_name,
+            "vendor_domain": req.domain,
+            "skills": [s.strip() for s in req.services.split(",") if s.strip()],
+            "preferred_work_mode": req.preferred_work_mode,
+            "service_tier": req.service_tier,
+            "min_budget": req.min_budget
+        }).execute()
+        
+        if not res.data:
+            raise HTTPException(status_code=500, detail="Failed to update database.")
+
+        return {"status": "success", "data": res.data[0]}
+    except Exception as e:
+        print(f"DEBUG: Database Error during profile update: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.post("/configure-project")
+async def configure_project(req: ProjectConfigRequest):
+    """Save constraints and update project status to 'matching'."""
+    try:
+        supabase = get_supabase()
+        
+        # Update the project with its new constraints
+        res = supabase.table("projects").update({
+            "budget": req.budget,
+            "deadline": req.deadline,
+            "work_mode": req.work_mode,
+            "service_tier": req.service_tier,
+            "status": "matching"
+        }).eq("id", req.project_id).execute()
+        
+        if not res.data:
+            raise HTTPException(status_code=500, detail="Failed to update project constraints.")
+
+        return {"status": "success", "data": res.data[0]}
+    except Exception as e:
+        print(f"DEBUG: Error configuring project: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/match-vendors")
+async def match_vendors(project_id: str):
+    """
+    Core AI Matching Engine:
+    Finds the project details, fetches all vendor profiles, and uses 
+    the LLM to score and rank them based on the project constraints.
+    """
+    try:
+        supabase = get_supabase()
+        
+        # 1. Fetch Project Details
+        proj_res = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj_res.data:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        project = proj_res.data[0]
+        
+        # Ensure it has been configured
+        if not project.get("budget") or not project.get("deadline"):
+             raise HTTPException(status_code=400, detail="Project must be configured first.")
+
+        # 2. Fetch All Vendors (In a real app, you would pre-filter by domain or vector search)
+        vendor_res = supabase.table("vendor_details").select("id, business_name, vendor_domain, skills").execute()
+        vendors = vendor_res.data
+        
+        if not vendors:
+            return {"status": "success", "matches": []}
+
+        from llm import MATCHING_PROMPT, call_llm, parse_json_response
+        import asyncio
+        
+        # 3. Score each vendor using AI (Running concurrently for speed)
+        async def score_vendor(vendor):
+            prompt = MATCHING_PROMPT.format(
+                project_name=project["project_name"],
+                required_technologies=project.get("required_technologies", "None specified"),
+                description=project.get("description", "None specified"),
+                budget=project.get("budget"),
+                deadline=project.get("deadline"),
+                work_mode=project.get("work_mode"),
+                service_tier=project.get("service_tier"),
+                business_name=vendor.get("business_name", "Unknown Vendor"),
+                vendor_domain=vendor.get("vendor_domain", "Unknown Domain"),
+                skills=", ".join(vendor.get("skills", []))
+            )
+            try:
+                # In a real async app we'd use an async LLM client, but for MVP we wrap the sync call
+                response = await asyncio.to_thread(call_llm, prompt)
+                result = parse_json_response(response)
+                
+                return {
+                    "vendor_id": vendor["id"],
+                    "business_name": vendor.get("business_name", "Unknown Vendor"),
+                    "domain": vendor.get("vendor_domain", "Unknown Domain"),
+                    "skills": vendor.get("skills", []),
+                    "match_score": result.get("score", 0),
+                    "match_reason": result.get("match_reason", "No reason provided.")
+                }
+            except Exception as e:
+                print(f"DEBUG: Failed to score vendor {vendor['id']}: {e}")
+                return None
+
+        # Gather all AI scores
+        tasks = [score_vendor(v) for v in vendors]
+        scored_vendors = await asyncio.gather(*tasks)
+        
+        # Filter out errors and sort by match_score descending
+        valid_matches = [v for v in scored_vendors if v is not None]
+        valid_matches.sort(key=lambda x: x["match_score"], reverse=True)
+        
+        # Return top 3 matches
+        top_matches = valid_matches[:3]
+
+        return {"status": "success", "matches": top_matches}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"DEBUG: Error in match engine: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/vendor-profile")
+def get_vendor_profile(vendor_id: str):
+    """Check if a vendor has completed onboarding by fetching their profile."""
+    try:
+        supabase = get_supabase()
+        res = supabase.table("vendor_details").select("*").eq("id", vendor_id).execute()
+        return {"status": "success", "data": res.data[0] if res.data else None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/invite-vendor")
+def invite_vendor(req: InviteRequest):
+    """Manager invites a vendor from the Matching Hub."""
+    try:
+        supabase = get_supabase()
+        # Insert the invitation, resolving conflicts if an invite already exists
+        res = supabase.table("invitations").upsert({
+            "project_id": req.project_id,
+            "vendor_id": req.vendor_id,
+            "status": "pending"
+        }).execute()
+        
+        if not res.data:
+            raise HTTPException(status_code=500, detail="Failed to send invitation.")
+            
+        return {"status": "success", "data": res.data[0]}
+    except Exception as e:
+        print(f"DEBUG: Invitation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to invite: {str(e)}")
+
+
+@app.get("/vendor-invitations")
+def get_vendor_invitations(vendor_id: str):
+    """Vendor fetches their inbox (all invitations + attached project details)."""
+    try:
+        supabase = get_supabase()
+        # Fetch invitations and join with the related project data
+        # Note: Supabase makes this easy with embedded resource syntax if FKs are set,
+        # but a simple two-step fetch is very reliable for hackathons.
+        invites_res = supabase.table("invitations").select("*").eq("vendor_id", vendor_id).execute()
+        invitations = invites_res.data
+        
+        if not invitations:
+             return {"status": "success", "data": []}
+             
+        # Optional: Enrich with project details
+        project_ids = [inv["project_id"] for inv in invitations]
+        projects_res = supabase.table("projects").select("*").in_("id", project_ids).execute()
+        projects = {p["id"]: p for p in projects_res.data}
+        
+        enriched = []
+        for inv in invitations:
+            proj = projects.get(inv["project_id"], {})
+            inv["project_details"] = proj
+            enriched.append(inv)
+            
+        return {"status": "success", "data": enriched}
+    except Exception as e:
+        print(f"DEBUG: Fetch invitations error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/respond-invitation")
+def respond_invitation(req: RespondInviteRequest):
+    """Vendor accepts or declines an invitation."""
+    try:
+        supabase = get_supabase()
+        res = supabase.table("invitations").update({
+            "status": req.action
+        }).eq("id", req.invitation_id).execute()
+        
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Invitation not found or could not be updated.")
+            
+        return {"status": "success", "data": res.data[0]}
+    except Exception as e:
+        print(f"DEBUG: Respond invite error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
