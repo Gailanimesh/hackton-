@@ -26,7 +26,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -76,6 +81,13 @@ class RespondInviteRequest(BaseModel):
 class TaskStatusRequest(BaseModel):
     task_id: str
     is_completed: bool
+
+
+class MessageRequest(BaseModel):
+    project_id: str
+    sender_id: str
+    sender_role: str
+    content: str
 
 
 # --- Prompts ---
@@ -566,22 +578,44 @@ def respond_invitation(req: RespondInviteRequest):
     """Vendor accepts or declines an invitation."""
     try:
         supabase = get_supabase()
+        
+        # 1. Fetch the invitation first
+        inv_res = supabase.table("invitations").select("*").eq("id", req.invitation_id).execute()
+        if not inv_res.data:
+            raise HTTPException(status_code=404, detail="Invitation not found.")
+        invitation = inv_res.data[0]
+        project_id = invitation["project_id"]
+
+        if req.action == 'accepted':
+            # 2. Check if another vendor already accepted this project
+            existing_res = supabase.table("invitations").select("id").eq("project_id", project_id).eq("status", "accepted").execute()
+            if existing_res.data and existing_res.data[0]["id"] != req.invitation_id:
+                raise HTTPException(status_code=400, detail="This project has already been assigned to another vendor. You cannot accept this invitation.")
+
+        # 3. Update the invitation status
         res = supabase.table("invitations").update({
             "status": req.action
         }).eq("id", req.invitation_id).execute()
         
         if not res.data:
-            raise HTTPException(status_code=404, detail="Invitation not found or could not be updated.")
+            raise HTTPException(status_code=500, detail="Could not update invitation.")
             
-        invitation = res.data[0]
+        updated_invitation = res.data[0]
         
-        # If accepted, mark the project as 'active' so the War Room can begin
         if req.action == 'accepted':
+            # Mark the project as active
             supabase.table("projects").update({
                 "status": "active"
-            }).eq("id", invitation["project_id"]).execute()
+            }).eq("id", project_id).execute()
             
-        return {"status": "success", "data": invitation}
+            # Auto-decline any other pending invitations for this project
+            supabase.table("invitations").update({
+                "status": "declined"
+            }).eq("project_id", project_id).eq("status", "pending").execute()
+            
+        return {"status": "success", "data": updated_invitation}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"DEBUG: Respond invite error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -639,6 +673,117 @@ def update_task_status(req: TaskStatusRequest):
             
         return {"status": "success", "data": res.data[0]}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/messages")
+def get_messages(project_id: str):
+    """Fetch chat history for a project."""
+    try:
+        supabase = get_supabase()
+        res = supabase.table("project_messages").select("*").eq("project_id", project_id).order("created_at", desc=False).execute()
+        return {"status": "success", "data": res.data}
+    except Exception as e:
+        print(f"DEBUG: Fetch messages error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/messages")
+def send_message(req: MessageRequest):
+    """Send a new message to the project war room."""
+    try:
+        supabase = get_supabase()
+        res = supabase.table("project_messages").insert({
+            "project_id": req.project_id,
+            "sender_id": req.sender_id,
+            "sender_role": req.sender_role,
+            "content": req.content
+        }).execute()
+        
+        if not res.data:
+            raise HTTPException(status_code=500, detail="Failed to send message")
+            
+        return {"status": "success", "data": res.data[0]}
+    except Exception as e:
+        print(f"DEBUG: Send message error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/messages")
+def get_messages(project_id: str):
+    """Fetch chat history for a project."""
+    try:
+        supabase = get_supabase()
+        res = supabase.table("project_messages").select("*").eq("project_id", project_id).order("created_at", desc=False).execute()
+        return {"status": "success", "data": res.data}
+    except Exception as e:
+        print(f"DEBUG: Fetch messages error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/messages")
+def send_message(req: MessageRequest):
+    """Send a new message to the project war room."""
+    try:
+        supabase = get_supabase()
+        res = supabase.table("project_messages").insert({
+            "project_id": req.project_id,
+            "sender_id": req.sender_id,
+            "sender_role": req.sender_role,
+            "content": req.content
+        }).execute()
+        
+        if not res.data:
+            raise HTTPException(status_code=500, detail="Failed to send message")
+            
+        return {"status": "success", "data": res.data[0]}
+    except Exception as e:
+        print(f"DEBUG: Send message error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/manager-war-rooms")
+def get_manager_war_rooms(user_id: str):
+    """Fetch all projects where the manager has sent invitations."""
+    try:
+        supabase = get_supabase()
+        
+        # 1. Get all missions for this manager
+        mission_res = supabase.table("missions").select("id").eq("user_id", user_id).execute()
+        missions = mission_res.data or []
+        if not missions:
+            return {"status": "success", "data": []}
+            
+        mission_ids = [m["id"] for m in missions]
+        
+        # 2. Get all projects under those missions
+        proj_res = supabase.table("projects").select("id, project_name").in_("mission_id", mission_ids).execute()
+        projects = proj_res.data or []
+        if not projects:
+            return {"status": "success", "data": []}
+
+        project_ids = [p["id"] for p in projects]
+        
+        # 3. Get invitations sent out for these projects
+        inv_res = supabase.table("invitations").select("project_id, status, vendor_id").in_("project_id", project_ids).execute()
+        invitations = inv_res.data or []
+
+        # Map project_id -> best invitation status
+        inv_map = {}
+        for inv in invitations:
+            pid = inv["project_id"]
+            current = inv_map.get(pid, "")
+            # Prefer accepted > pending
+            if inv["status"] == "accepted" or current == "":
+                inv_map[pid] = inv["status"]
+
+        # Only include projects that have at least one invitation sent
+        active = [
+            {
+                "project_id": p["id"],
+                "project_name": p["project_name"],
+                "invitation_status": inv_map[p["id"]]
+            }
+            for p in projects if p["id"] in inv_map
+        ]
+        return {"status": "success", "data": active}
+    except Exception as e:
+        print(f"DEBUG: Manager war rooms error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
