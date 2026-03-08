@@ -6,7 +6,12 @@ export const metadata: Metadata = {
   title: 'VENDEX - AI Procurement Automation',
   description: 'Transform any complex mission into actionable projects & tasks in seconds.',
   icons: {
-    icon: '/vendex_logo.png',
+    icon: [
+      { url: '/vendex_logo.png', sizes: '512x512', type: 'image/png' },
+      { url: '/vendex_logo.png', sizes: '192x192', type: 'image/png' },
+      { url: '/vendex_logo.png', sizes: '32x32', type: 'image/png' },
+    ],
+    apple: '/vendex_logo.png',
   },
 };
 
