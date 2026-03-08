@@ -113,7 +113,7 @@ export async function getVendorInvitations(
 // ─── Vendor: Accept or decline invitation ────────────────────────────────────
 export async function respondInvitation(
   invitationId: string,
-  action: 'accepted' | 'declined'
+  action: 'accepted' | 'declined' | 'interested'
 ): Promise<void> {
   await apiFetch('/respond-invitation', {
     method: 'POST',
@@ -168,4 +168,13 @@ export async function sendMessage(
       content,
     }),
   });
+}
+
+// ─── AI Mapper: Select Best Vendor ─────────────────────────────────────────
+export async function runMapperSelection(projectId: string): Promise<{ winner_id: string, reasoning: string }> {
+  const res = await apiFetch<{ winner_id: string, reasoning: string }>('/run-mapper-selection', {
+    method: 'POST',
+    body: JSON.stringify({ project_id: projectId }),
+  });
+  return res;
 }

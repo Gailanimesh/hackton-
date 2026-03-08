@@ -16,13 +16,16 @@ export default function VendorInvitationCard({ invitation: inv, onUpdate }: Prop
   const router = useRouter();
   const [processing, setProcessing] = useState(false);
 
-  const handleRespond = async (action: 'accepted' | 'declined') => {
+  const handleRespond = async (action: 'accepted' | 'declined' | 'interested') => {
     setProcessing(true);
     try {
       await respondInvitation(inv.id, action);
       if (action === 'accepted') {
         showToast('Project Accepted! Entering War Room...', 'success');
         setTimeout(() => router.push(`/war-room/${inv.project_id}`), 1000);
+      } else if (action === 'interested') {
+        showToast('Interest submitted! Awaiting Manager AI Selection.', 'success');
+        onUpdate();
       } else {
         showToast('Invitation declined.', 'success');
         onUpdate();
@@ -40,6 +43,10 @@ export default function VendorInvitationCard({ invitation: inv, onUpdate }: Prop
       setProcessing(false);
     }
   };
+
+  const hasRfp = !!inv.project_details?.rfp_rules;
+  const acceptAction = hasRfp ? 'interested' : 'accepted';
+  const acceptText = hasRfp ? 'Submit Proposal / Interest' : 'Accept & Enter War Room';
 
   return (
     <div className="match-card fade-in" style={{ textAlign: 'left' }}>
@@ -72,6 +79,11 @@ export default function VendorInvitationCard({ invitation: inv, onUpdate }: Prop
       <div className="match-reason" style={{ marginTop: '1rem', fontSize: '0.9rem', opacity: 0.8 }}>
         <strong>Requirements:</strong> {inv.project_details?.required_technologies || 'None specified'}<br /><br />
         <strong>Mode:</strong> {inv.project_details?.work_mode || 'N/A'} &nbsp;|&nbsp; <strong>Tier:</strong> {inv.project_details?.service_tier || 'N/A'}
+        {hasRfp && (
+          <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: 'rgba(255,165,0,0.1)', borderLeft: '3px solid orange', borderRadius: '4px' }}>
+            <strong style={{ color: 'orange' }}>RFP Rules:</strong> {inv.project_details?.rfp_rules}
+          </div>
+        )}
       </div>
 
       {/* Actions */}
@@ -85,19 +97,23 @@ export default function VendorInvitationCard({ invitation: inv, onUpdate }: Prop
           >
             Decline
           </button>
-          <button className="match-btn" style={{ width: 'auto', margin: 0 }} onClick={() => handleRespond('accepted')} disabled={processing}>
-            Accept &amp; Enter War Room
+          <button className="match-btn" style={{ width: 'auto', margin: 0 }} onClick={() => handleRespond(acceptAction)} disabled={processing}>
+            {acceptText}
           </button>
         </div>
       ) : (
         <div style={{ marginTop: '1rem' }}>
           <button
             className="match-btn"
-            style={{ width: '100%', margin: 0, background: inv.status === 'accepted' ? '#00f2fe' : 'rgba(255,255,255,0.1)', color: inv.status === 'accepted' ? '#000' : '#fff' }}
-            disabled={inv.status === 'declined'}
+            style={{ 
+              width: '100%', margin: 0, 
+              background: inv.status === 'accepted' ? '#00f2fe' : (inv.status === 'interested' ? 'orange' : 'rgba(255,255,255,0.1)'), 
+              color: (inv.status === 'accepted' || inv.status === 'interested') ? '#000' : '#fff' 
+            }}
+            disabled={inv.status === 'declined' || inv.status === 'interested'}
             onClick={() => inv.status === 'accepted' && router.push(`/war-room/${inv.project_id}`)}
           >
-            {inv.status === 'accepted' ? 'ENTER WAR ROOM' : 'DECLINED'}
+            {inv.status === 'accepted' ? 'ENTER WAR ROOM' : (inv.status === 'interested' ? 'PROPOSAL SUBMITTED' : 'DECLINED')}
           </button>
         </div>
       )}

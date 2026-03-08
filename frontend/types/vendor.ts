@@ -36,7 +36,7 @@ export type Invitation = {
   id: string;
   project_id: string;
   vendor_id: string;
-  status: 'pending' | 'accepted' | 'declined';
+  status: 'pending' | 'accepted' | 'declined' | 'interested';
   match_score?: number;
   fit_analysis?: string;
   project_details?: {
@@ -46,5 +46,6 @@ export type Invitation = {
     required_technologies?: string;
     work_mode?: string;
     service_tier?: string;
+    rfp_rules?: string;
   };
 };

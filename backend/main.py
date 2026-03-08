@@ -89,6 +89,9 @@ class MessageRequest(BaseModel):
     sender_role: str
     content: str
 
+class RunMapperRequest(BaseModel):
+    project_id: str
+
 
 # --- Prompts ---
 PROJECT_PROMPT = """You are a procurement planning expert.
@@ -620,6 +623,93 @@ def respond_invitation(req: RespondInviteRequest):
         print(f"DEBUG: Respond invite error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/run-mapper-selection")
+def run_mapper_selection(req: RunMapperRequest):
+    """Evaluate all 'interested' vendors for a project and select the best one based on RFP rules."""
+    try:
+        supabase = get_supabase()
+        
+        # 1. Fetch Project
+        proj_res = supabase.table("projects").select("*").eq("id", req.project_id).execute()
+        if not proj_res.data:
+            raise HTTPException(status_code=404, detail="Project not found")
+        project = proj_res.data[0]
+        
+        # 2. Fetch all interested invitations
+        inv_res = supabase.table("invitations").select("*").eq("project_id", req.project_id).eq("status", "interested").execute()
+        interested_invites = inv_res.data
+        if not interested_invites:
+            raise HTTPException(status_code=400, detail="No vendors have expressed interest yet.")
+            
+        if len(interested_invites) == 1:
+            winner_id = interested_invites[0]["vendor_id"]
+            winner_inv = interested_invites[0]
+            reasoning = "Selected by default as the only interested vendor."
+        else:
+            # 3. Fetch vendor profiles
+            vendor_ids = [inv["vendor_id"] for inv in interested_invites]
+            vendors_res = supabase.table("vendor_details").select("*").in_("id", vendor_ids).execute()
+            vendors = {v["id"]: v for v in vendors_res.data}
+            
+            # Prepare LLM prompt
+            vendors_text = ""
+            for inv in interested_invites:
+                v = vendors.get(inv["vendor_id"], {})
+                vendors_text += f"\n--- VENDOR ID: {v.get('id')} ---\nName: {v.get('business_name')}\nDomain: {v.get('domain')}\nSkills: {v.get('services')}\nTier: {v.get('service_tier')}\n"
+            
+            prompt = f"""You are an AI Procurement Manager.
+A project has strict RFP requirements. Multiple vendors have expressed interest. 
+Choose the SINGLE BEST vendor based on their skills and tier.
+
+PROJECT DETAILS:
+Name: {project.get('project_name')}
+Required Tech: {project.get('required_technologies')}
+RFP Rules: {project.get('rfp_rules')}
+Budget: ${project.get('budget')} | Deadline: {project.get('deadline')}
+
+INTERESTED VENDORS:
+{vendors_text}
+
+Analyze the vendors and select the best one.
+Return ONLY a valid JSON object in this format:
+{{"winner_vendor_id": "the-uuid-of-the-winner", "reasoning": "A 1-sentence explanation of why they won over the others."}}
+"""
+            raw = call_llm(prompt)
+            data = parse_json_response(raw)
+            winner_id = data.get("winner_vendor_id")
+            reasoning = data.get("reasoning", "AI Selected this vendor as the best match.")
+            
+            # Find the winning invitation
+            winner_inv = next((inv for inv in interested_invites if inv["vendor_id"] == winner_id), None)
+            if not winner_inv:
+                # LLM hallucinated an ID, fallback
+                winner_inv = interested_invites[0]
+                winner_id = winner_inv["vendor_id"]
+                reasoning = "Selected via fallback because AI returned invalid ID."
+
+        # 4. Update the winner to 'accepted'
+        supabase.table("invitations").update({
+            "status": "accepted",
+            "fit_analysis": f"🏆 YOU WERE SELECTED! {reasoning}"
+        }).eq("id", winner_inv["id"]).execute()
+        
+        # 5. Update the rest to 'declined'
+        loser_ids = [inv["id"] for inv in interested_invites if inv["id"] != winner_inv["id"]]
+        if loser_ids:
+            supabase.table("invitations").update({
+                "status": "declined",
+                "fit_analysis": "Unfortunately, the Manager AI selected another vendor for this specific project based on RFP constraints."
+            }).in_("id", loser_ids).execute()
+            
+        # 6. Mark project as active
+        supabase.table("projects").update({"status": "active"}).eq("id", req.project_id).execute()
+        
+        return {"status": "success", "winner_id": winner_id, "reasoning": reasoning}
+    except Exception as e:
+        print(f"DEBUG: Mapper error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/project-war-room")
 def get_project_war_room(project_id: str):
     """Fetch all data needed for the shared execution dashboard."""
@@ -765,11 +855,19 @@ def get_manager_war_rooms(user_id: str):
 
         # Map project_id -> best invitation status
         inv_map = {}
+        interested_counts = {}
         for inv in invitations:
             pid = inv["project_id"]
+            if inv["status"] == "interested":
+                interested_counts[pid] = interested_counts.get(pid, 0) + 1
+                
             current = inv_map.get(pid, "")
-            # Prefer accepted > pending
-            if inv["status"] == "accepted" or current == "":
+            # Prefer accepted > interested > pending
+            if inv["status"] == "accepted":
+                inv_map[pid] = "accepted"
+            elif inv["status"] == "interested" and current != "accepted":
+                inv_map[pid] = "interested"
+            elif current == "":
                 inv_map[pid] = inv["status"]
 
         # Only include projects that have at least one invitation sent
@@ -777,7 +875,8 @@ def get_manager_war_rooms(user_id: str):
             {
                 "project_id": p["id"],
                 "project_name": p["project_name"],
-                "invitation_status": inv_map[p["id"]]
+                "invitation_status": inv_map[p["id"]],
+                "interested_count": interested_counts.get(p["id"], 0)
             }
             for p in projects if p["id"] in inv_map
         ]

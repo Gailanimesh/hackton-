@@ -6,28 +6,54 @@ import { useRouter } from 'next/navigation';
 interface WarRoomEntry {
   project_id: string;
   project_name: string;
-  invitation_status: 'pending' | 'accepted';
+  invitation_status: 'pending' | 'accepted' | 'interested';
+  interested_count?: number;
 }
 
 interface Props {
   userId: string;
 }
 
+import { runMapperSelection } from '@/lib/api';
+import { useToast } from './ToastNotification';
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000';
 
 export default function ActiveWarRooms({ userId }: Props) {
   const router = useRouter();
+  const { showToast } = useToast();
   const [entries, setEntries] = useState<WarRoomEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [mappingId, setMappingId] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchRooms = () => {
     if (!userId) return;
     fetch(`${API_BASE}/manager-war-rooms?user_id=${userId}`)
       .then((r) => r.json())
       .then((res) => setEntries(res.data || []))
       .catch(() => setEntries([]))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchRooms();
   }, [userId]);
+
+  const handleRunMapper = async (e: React.MouseEvent, projectId: string) => {
+    e.stopPropagation();
+    setMappingId(projectId);
+    showToast('AI Mapper evaluating vendors based on RFP rules...', 'success');
+    try {
+      const res = await runMapperSelection(projectId);
+      showToast(`🏆 Winner selected: ${res.reasoning}`, 'success');
+      // Refresh list to update status to accepted
+      setTimeout(fetchRooms, 1500);
+    } catch (err: any) {
+      showToast(err instanceof Error ? err.message : 'Mapper failed', 'error');
+    } finally {
+      setMappingId(null);
+    }
+  };
 
   if (loading || entries.length === 0) return null;
 
@@ -71,26 +97,41 @@ export default function ActiveWarRooms({ userId }: Props) {
               {/* Status badge */}
               <div style={{
                 display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
-                background: `${accentColor}20`,
-                border: `1px solid ${accentColor}50`,
-                color: accentColor,
+                background: entry.invitation_status === 'interested' ? 'rgba(255,165,0,0.2)' : `${accentColor}20`,
+                border: `1px solid ${entry.invitation_status === 'interested' ? 'orange' : accentColor}50`,
+                color: entry.invitation_status === 'interested' ? 'orange' : accentColor,
                 fontSize: '0.6rem', fontWeight: 700, letterSpacing: '2px',
                 textTransform: 'uppercase',
                 padding: '0.25rem 0.75rem',
                 borderRadius: '30px',
                 marginBottom: '0.75rem',
               }}>
-                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: accentColor, display: 'inline-block' }} />
-                {isAccepted ? 'Vendor Accepted' : 'Invite Sent'}
+                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: entry.invitation_status === 'interested' ? 'orange' : accentColor, display: 'inline-block' }} />
+                {isAccepted ? 'Vendor Accepted' : (entry.invitation_status === 'interested' ? 'Proposals Pending' : 'Invite Sent')}
               </div>
 
               <div style={{ fontWeight: 700, fontSize: '0.95rem', color: '#fff', marginBottom: '0.75rem', lineHeight: 1.3 }}>
                 {entry.project_name}
               </div>
 
-              <div style={{ fontSize: '0.78rem', color: `${accentColor}cc`, fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                Open War Room →
-              </div>
+              {entry.invitation_status === 'interested' ? (
+                <button
+                  onClick={(e) => handleRunMapper(e, entry.project_id)}
+                  disabled={mappingId === entry.project_id}
+                  style={{
+                    width: '100%', marginTop: 'auto', background: 'orange', color: '#000',
+                    border: 'none', padding: '0.6rem', borderRadius: '8px', cursor: 'pointer',
+                    fontWeight: 'bold', fontSize: '0.8rem',
+                    opacity: mappingId === entry.project_id ? 0.7 : 1
+                  }}
+                >
+                  {mappingId === entry.project_id ? 'EVALUATING...' : `RUN AI MAPPER (${entry.interested_count} Proposals)`}
+                </button>
+              ) : (
+                <div style={{ fontSize: '0.78rem', color: `${accentColor}cc`, fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  Open War Room →
+                </div>
+              )}
             </div>
           );
         })}
